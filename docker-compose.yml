@@ -1,0 +1,22 @@
+services:
+  identity-event-source:
+    build: .
+    container_name: identity-event-source
+    command: ["python", "-u", "identity_generator.py"]
+    environment:
+      - API_URL=http://host.docker.internal:2500
+      - INTERVAL=3
+      - ANOMALY_RATE=0.15
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
+  ics-event-source:
+    build: .
+    container_name: ics-event-source
+    command: ["python", "-u", "ics_generator.py"]
+    environment:
+      - API_URL=http://host.docker.internal:2500
+      - INTERVAL=3
+      - ANOMALY_RATE=0.15
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
