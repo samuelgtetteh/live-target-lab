@@ -25,6 +25,12 @@ import requests
 API_URL = os.environ.get("API_URL", "http://host.docker.internal:2500")
 INTERVAL = float(os.environ.get("INTERVAL", "3"))
 ANOMALY_RATE = float(os.environ.get("ANOMALY_RATE", "0.15"))
+# When enabled, report the KNOWN injected label back to the decision layer's feedback
+# endpoint, keyed by the X-Verdict-Id the API returns for each scored event. This is
+# how the live trail gets ground truth: the backend can then compute live precision/
+# recall. In a real deployment this same channel is driven by an analyst or SOAR tool;
+# here the event source plays that role because it alone knows the intended label.
+FEEDBACK = os.environ.get("FEEDBACK", "1").lower() not in ("0", "false", "")
 
 # An attack tick emits a burst of this many logins from ONE account across this
 # many distinct machines, fast enough to fall inside the model's rolling window.
@@ -70,6 +76,22 @@ def make_attack_event(user, pc):
     }
 
 
+def submit_feedback(verdict_id, intended_suspicious):
+    """Report the known injected label to the decision layer, keyed by the verdict id
+    the API returned. Best-effort: a missing header (older backend) or a failed call is
+    ignored so the generator keeps streaming regardless."""
+    if not (FEEDBACK and verdict_id):
+        return
+    try:
+        requests.post(
+            f"{API_URL}/decision/verdicts/{verdict_id}/feedback",
+            json={"ground_truth": "malicious" if intended_suspicious else "benign"},
+            timeout=5,
+        )
+    except requests.RequestException:
+        pass
+
+
 def send_and_log(event, intended_suspicious):
     timestamp = datetime.now().strftime("%H:%M:%S")
     try:
@@ -79,11 +101,13 @@ def send_and_log(event, intended_suspicious):
     except requests.RequestException as exc:
         print(f"[{timestamp}] ERROR calling {API_URL}: {exc}")
         return
+    verdict_id = resp.headers.get("X-Verdict-Id")
+    submit_feedback(verdict_id, intended_suspicious)
     status = "ALERT" if result["is_anomaly"] else "OK"
     tag = "(injected suspicious)" if intended_suspicious else "(injected normal)"
     print(f"[{timestamp}] {status:>5} {tag} :: {event['src_user']} on {event['src_pc']} "
           f"({event['auth_type']}/{event['logon_type']}, {event['success']}) "
-          f"score={result['anomaly_score']:.3f}")
+          f"score={result['anomaly_score']:.3f} verdict={verdict_id}")
 
 
 def run():

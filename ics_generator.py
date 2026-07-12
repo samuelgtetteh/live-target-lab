@@ -19,6 +19,11 @@ import requests
 API_URL = os.environ.get("API_URL", "http://host.docker.internal:2500")
 INTERVAL = float(os.environ.get("INTERVAL", "3"))
 ANOMALY_RATE = float(os.environ.get("ANOMALY_RATE", "0.15"))
+# When enabled, report the KNOWN injected label (attack vs normal) back to the decision
+# layer's feedback endpoint, keyed by the X-Verdict-Id the API returns. This labels the
+# live trail with ground truth so the backend can compute live precision/recall; in a
+# real deployment the same channel is driven by an operator/SOAR tool.
+FEEDBACK = os.environ.get("FEEDBACK", "1").lower() not in ("0", "false", "")
 NORMAL_NOISE_STDS = 0.05  # normal jitter: a fraction of the sensor's real trained std dev
 ATTACK_SPIKE_STDS = 25    # attack spike: many std devs away - implausible for real sensor drift
 
@@ -68,6 +73,22 @@ SENSOR_STD = {
 SENSOR_NAMES = list(BASELINE_READING.keys())
 
 
+def submit_feedback(verdict_id, intended_attack):
+    """Report the known injected label to the decision layer, keyed by the verdict id
+    the API returned. Best-effort: a missing header (older backend) or a failed call is
+    ignored so the generator keeps streaming regardless."""
+    if not (FEEDBACK and verdict_id):
+        return
+    try:
+        requests.post(
+            f"{API_URL}/decision/verdicts/{verdict_id}/feedback",
+            json={"ground_truth": "malicious" if intended_attack else "benign"},
+            timeout=5,
+        )
+    except requests.RequestException:
+        pass
+
+
 def generate_reading():
     readings = {
         k: v + random.gauss(0, SENSOR_STD[k] * NORMAL_NOISE_STDS)
@@ -97,10 +118,12 @@ def run():
             time.sleep(INTERVAL)
             continue
 
+        verdict_id = resp.headers.get("X-Verdict-Id")
+        submit_feedback(verdict_id, intended_attack)
         status = "ALERT" if result["is_anomaly"] else "OK"
         tag = "(injected attack)" if intended_attack else "(injected normal)"
         print(f"[{timestamp}] {status:>5} {tag} :: reconstruction_error={result['reconstruction_error']:.4f} "
-              f"(threshold={result['threshold']})")
+              f"(threshold={result['threshold']}) verdict={verdict_id}")
 
         time.sleep(INTERVAL)
 
